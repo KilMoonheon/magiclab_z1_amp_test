@@ -18,7 +18,7 @@ from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
-from magiclab_rl_lab.assets.robots.magiclab import MAGICLAB_Z1_23DOF_CFG as ROBOT_CFG
+from magiclab_rl_lab.assets.robots.magiclab import MAGICLAB_Z1_12DOF_CFG as ROBOT_CFG
 from magiclab_rl_lab.tasks.locomotion import mdp
 
 COBBLESTONE_ROAD_CFG = terrain_gen.TerrainGeneratorCfg(
@@ -174,11 +174,7 @@ class EventCfg:
     reset_robot_joints = EventTerm(
         func=mdp.reset_joints_by_scale,
         mode="reset",
-        params={
-            "position_range": (0.5, 1.5), # 在初始姿态基础上做 50%-150% 的缩放偏移
-            "velocity_range": (-0.1, 0.1),
-            "asset_cfg": SceneEntityCfg("robot", joint_names=[".*"])
-        },
+        params={"position_range": (1.0, 1.0), "velocity_range": (-1.0, 1.0)},
     )
 
     # interval
@@ -220,12 +216,13 @@ class CommandsCfg:
         heading_command=False,
         debug_vis=True,
         ranges=mdp.UniformLevelVelocityCommandCfg.Ranges(
-            lin_vel_x=(-0.15, 1.0), lin_vel_y=(-0.25, 0.25), ang_vel_z=(-0.25, 0.25)
+            lin_vel_x=(-0.05, 2.5), lin_vel_y=(-0.5, 0.5), ang_vel_z=(-0.75, 0.75)
         ),
         limit_ranges=mdp.UniformLevelVelocityCommandCfg.Ranges(
-            lin_vel_x=(-0.25, 1.5), lin_vel_y=(-0.5, 0.5), ang_vel_z=(-0.5, 0.5)
+            lin_vel_x=(-0.75, 2.0), lin_vel_y=(-1.0, 1.0), ang_vel_z=(-0.75, 0.75)
         ),
     )
+
 
 @configclass
 class ActionsCfg:
@@ -259,14 +256,8 @@ class ObservationsCfg:
     class AmpCfg(ObsGroup):
         """AMP observations for discriminator"""
 
-        # root height
-        root_height = ObsTerm(
-            func=mdp.base_pos_z
-        )
-
-        # root orientation
-        root_rot = ObsTerm(
-            func=mdp.root_quat_w
+        root_pos = ObsTerm(
+            func=mdp.root_pos_w # 假设使用 base_pos 获取 (X, Y, Z)
         )
 
         # joint pos (only legs)
@@ -294,37 +285,11 @@ class ObservationsCfg:
             }
         )
 
-        # joint vel
-        joint_vel = ObsTerm(
-            func=mdp.joint_vel_rel,
-            params={
-                "asset_cfg": SceneEntityCfg(
-                    "robot",
-                    joint_names=[
-                        "left_hip_pitch_joint",
-                        "left_hip_roll_joint",
-                        "left_hip_yaw_joint",
-                        "left_knee_joint",
-                        "left_ankle_pitch_joint",
-                        "left_ankle_roll_joint",
-                        "right_hip_pitch_joint",
-                        "right_hip_roll_joint",
-                        "right_hip_yaw_joint",
-                        "right_knee_joint",
-                        "right_ankle_pitch_joint",
-                        "right_ankle_roll_joint",
-                    ],
-                    preserve_order=True
-                )
-            }
-        )
-
         def __post_init__(self):
             self.history_length = 2
             self.concatenate_terms = True
 
     amp: AmpCfg = AmpCfg()
-
 
     @configclass
     class PolicyCfg(ObsGroup):
@@ -477,56 +442,79 @@ class ObservationsCfg:
 
 @configclass
 class RewardsCfg:
-    """针对 AMP 优化的奖励配置"""
+    """Reward terms for the MDP."""
 
-    # --- 1. 风格奖励 (核心) ---
-    amp_reward = RewTerm(func=mdp.amp_reward, weight=0, params={"resource_name": "amp_handler"})
-
-    # --- 2. 任务目标奖励 (保留) ---
-    # 引导机器人寻找球
-    seek_ball = RewTerm(func=mdp.seek_ball_reward, weight=0.0, params={"ball_cfg": SceneEntityCfg("soccer_ball")})
-    # 进球大奖
-    goal_event = RewTerm(func=mdp.goal_score_reward, weight=0.0, params={"goal_box": [4.3, 5.0, -1.3, 1.3], "ball_cfg": SceneEntityCfg("soccer_ball")})
-    # 带球和射门阶段奖励
-    dribble_progression = RewTerm(func=mdp.dribble_phase_reward, weight=0, params={"goal_pos": [4.5, 0.0], "ball_cfg": SceneEntityCfg("soccer_ball"), "asset_cfg": SceneEntityCfg("robot")})
-    shooting_dominant = RewTerm(func=mdp.shoot_phase_reward, weight=0.0, params={"dominant_leg_idx": 1, "goal_pos": [4.5, 0.0], "goal_box": [4.3, 5.0, -1.3, 1.3], "ball_cfg": SceneEntityCfg("soccer_ball"), "asset_cfg": SceneEntityCfg("robot", body_names=[".*ankle_roll_link", ".*knee_link"])})
-
-    # 足球出界惩罚
-    ball_out_of_bounds = RewTerm(func=mdp.ball_boundary_penalty, weight=0.0, params={"x_limit": 4.5, "y_limit": 3.0})
-    # 控球稳定性
-    ball_stability = RewTerm(func=mdp.ball_relative_velocity_penalty, weight=0.0, params={"decay_std": 0.5})
-
-     # -- task
+    # -- task
     track_lin_vel_xy = RewTerm(
         func=mdp.track_lin_vel_xy_yaw_frame_exp,
-        weight=1.0,
+        weight=1,
         params={"command_name": "base_velocity", "std": math.sqrt(0.25)},
     )
     track_ang_vel_z = RewTerm(
         func=mdp.track_ang_vel_z_exp, weight=0.5, params={"command_name": "base_velocity", "std": math.sqrt(0.25)}
     )
 
-    alive = RewTerm(func=mdp.is_alive, weight=0.15)
+
+
+    alive = RewTerm(func=mdp.is_alive, weight=3.15)
 
     # -- base
-    base_linear_velocity = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
+    base_linear_velocity = RewTerm(func=mdp.lin_vel_z_l2, weight=-6.0)
+
     base_angular_velocity = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.05)
     joint_vel = RewTerm(func=mdp.joint_vel_l2, weight=-0.001)
     joint_acc = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
-    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.05)
+    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.12)
     dof_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=-5.0)
     energy = RewTerm(func=mdp.energy, weight=-2e-5)
 
+    # joint_deviation_arms = RewTerm(
+    #     func=mdp.joint_deviation_l1,
+    #     weight=-0.1,
+    #     params={
+    #         "asset_cfg": SceneEntityCfg(
+    #             "robot",
+    #             joint_names=[
+    #                 ".*_shoulder_.*_joint",
+    #                 ".*_elbow_joint",
+    #                 ".*_wrist_.*",
+    #             ],
+    #         )
+    #     },
+    # )
+    # joint_deviation_waists = RewTerm(
+    #     func=mdp.joint_deviation_l1,
+    #     weight=-1,
+    #     params={
+    #         "asset_cfg": SceneEntityCfg(
+    #             "robot",
+    #             joint_names=[
+    #                 "waist.*",
+    #             ],
+    #         )
+    #     },
+    # )
     joint_deviation_legs = RewTerm(
         func=mdp.joint_deviation_l1,
-        weight=-0.7,
+        weight=-0.25,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_roll_joint", ".*_hip_yaw_joint"])},
     )
 
+    # joint_pos_penalty = RewTerm(
+    #     func=mdp.joint_pos_penalty,
+    #     weight=-1,
+    #     params={
+    #         "command_name": "base_velocity",
+    #         "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+    #         "stand_still_scale": 5.0,
+    #         "velocity_threshold": 0.2,
+    #         "command_threshold": 0.05,
+    #     },
+    # )
 
     # -- robot
     flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-5.0)
-    base_height = RewTerm(func=mdp.base_height_l2, weight=-10, params={"target_height": 0.7})
+    base_height = RewTerm(func=mdp.base_height_l2, weight=-2, params={"target_height": 0.7})
 
     stand_still = RewTerm(
         func=mdp.stand_still_joint_deviation_l1,
@@ -538,30 +526,45 @@ class RewardsCfg:
         },
     )
 
-
+    # -- feet
+    '''
+    gait = RewTerm(
+        func=mdp.feet_gait,
+        weight=0.5,
+        params={
+            "period": 0.6,
+            "offset": [0.0, 0.5],
+            "threshold": 0.55,
+            "command_name": "base_velocity",
+            "command_threshold": 0.05,
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ankle_roll.*"),
+        },
+    )
+    '''
 
     feet_contact_number = RewTerm(
         func=mdp.feet_contact_number,
-        weight=0.5,#1.2,
+        weight=0.0,#1.2,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ankle_roll.*"),
-            "period": 0.6,
+            "period": 0.4,
         },
     )
 
     feet_slide = RewTerm(
         func=mdp.feet_slide,
-        weight=-0.2,
+        weight=0.0,
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*ankle_roll.*"),
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ankle_roll.*"),
         },
     )
+
     feet_clearance = RewTerm(
         func=mdp.foot_clearance_reward,
-        weight=1.0,
+        weight=0.0,
         params={
-            "std": 0.05,
+            "std": 0.1,
             "tanh_mult": 2.0,
             "target_height": 0.1,
             "asset_cfg": SceneEntityCfg("robot", body_names=".*ankle_roll.*"),
@@ -569,6 +572,17 @@ class RewardsCfg:
     )
 
     # -- other
+    # 1. 腾空奖励 (这是你刚加到 rewards.py 里的函数)
+    feet_air_time = RewTerm(
+        func=mdp.feet_air_time,
+        weight=0.0,  # 权重给高一点，鼓励它飞起来
+        params={
+            "command_name": "base_velocity",
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ankle_roll.*"),
+            "threshold": 0.15, # 腾空超过 0.15 秒才开始拿奖励
+        },
+    )
+
     undesired_contacts = RewTerm(
         func=mdp.undesired_contacts,
         weight=-1,
@@ -576,6 +590,108 @@ class RewardsCfg:
             "threshold": 1,
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["(?!.*ankle.*).*"]),
         },
+    )
+
+    # 2. 步态节奏奖励 (源码里本来就有这个函数)
+    air_time_variance = RewTerm(
+        func=mdp.air_time_variance_penalty_decay,
+        weight=0.0, # 负权重，惩罚双腿节奏不统一
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ankle_roll.*"),
+            "decay_std": 1.0,
+        },
+    )
+
+    # 3. 防绊倒奖励 (源码里本来就有这个函数)
+    feet_stumble = RewTerm(
+        func=mdp.feet_stumble,
+        weight=0.0, # 负权重，惩罚脚尖踢地
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ankle_roll.*"),
+        },
+    )
+
+    # --- 2. 足球分层任务 (核心修改点) ---
+    command_align_ball = RewTerm(
+        func=mdp.heading_align_with_ball,
+        weight=0.0,  # 较大的权重，强制引导行走方向
+        params={
+            # "command_name": "base_velocity", 
+            "ball_cfg": SceneEntityCfg("soccer_ball"),
+            "asset_cfg": SceneEntityCfg("robot")
+        }
+    )
+    towards_gate = RewTerm(
+        func=mdp.ball_towards_goal_area_reward,
+        weight=0,
+        params={
+            "ball_cfg":SceneEntityCfg("soccer_ball")
+        }
+    )
+
+    # 阶段 A: 寻球 (远处激活)
+    seek_ball = RewTerm(
+        func=mdp.seek_ball_reward,
+        weight=0.0,
+        params={"ball_cfg": SceneEntityCfg("soccer_ball")}
+    )
+
+    # 阶段 B: 带球 (近处且离球门远时激活)
+    dribble_progression = RewTerm(
+        func=mdp.dribble_phase_reward,
+        weight=0.0,
+        params={
+            "goal_pos": [4.5, 0.0],
+            "ball_cfg": SceneEntityCfg("soccer_ball"),
+            "asset_cfg": SceneEntityCfg("robot")
+        }
+    )
+
+    # 阶段 C: 射门 (近处且靠近球门时激活)
+    shooting_dominant = RewTerm(
+        func=mdp.shoot_phase_reward,
+        weight=0.0,  
+        params={
+            "dominant_leg_idx": 1, # 注意：这里建议直接填入对应的索引，或者确保索引正确
+            "goal_pos": [4.5, 0.0],
+            "goal_box": [4.3, 5.0, -1.3, 1.3],
+            "ball_cfg": SceneEntityCfg("soccer_ball"),
+            # 修改这里：显式指定 body_names，使 body_ids 成为一个列表
+            "asset_cfg": SceneEntityCfg(
+                "robot", 
+                body_names=[
+                    "left_hip_pitch_link", "left_hip_roll_link", "left_hip_yaw_link",
+                    "left_knee_link", "left_ankle_pitch_link", "left_ankle_roll_link",
+                    "right_hip_pitch_link", "right_hip_roll_link", "right_hip_yaw_link",
+                    "right_knee_link", "right_ankle_pitch_link", "right_ankle_roll_link"
+                ]
+            )
+        }
+    )
+
+    # --- 3. 辅助约束 (保持开启) ---
+    # 进球终极大奖
+    goal_event = RewTerm(
+        func=mdp.goal_score_reward,
+        weight=0.0,
+        params={
+            "goal_box": [4.3, 5.0, -1.3, 1.3],
+            "ball_cfg": SceneEntityCfg("soccer_ball")
+        }
+    )
+
+    # 控球稳定性：惩罚撞飞球
+    ball_stability = RewTerm(
+        func=mdp.ball_relative_velocity_penalty,
+        weight=-0.0,
+        params={"decay_std": 0.5}
+    )
+
+    # 边界惩罚：防止球出界
+    ball_out_of_bounds = RewTerm(
+        func=mdp.ball_boundary_penalty,
+        weight=0.0, # 函数内部已处理负号
+        params={"x_limit": 5.0, "y_limit": 3.0}
     )
 
 
@@ -697,10 +813,10 @@ class RobotEnvCfg(ManagerBasedRLEnvCfg):
         # --- 核心频率设置 ---
         # decimation = 4 意味着控制频率为 1/0.002/4 = 125Hz
         # 踢球是瞬时爆发动作，125Hz 才能保证脚接触球的物理模拟准确，50Hz(10)太慢了
-        self.decimation = 5
+        self.decimation = 10
 
         # 射门回合长度，固定点位练习 5-10s 足够，长途奔跑建议 15s
-        self.episode_length_s = 30.0
+        self.episode_length_s = 15.0
 
         # --- 仿真设置 ---
         self.sim.dt = 0.002
