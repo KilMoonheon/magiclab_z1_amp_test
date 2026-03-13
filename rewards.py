@@ -18,30 +18,6 @@ import isaaclab.utils.math as math_utils
 Joint penalties.
 """
 
-def compute_task_reward(self):
-
-    # velocity tracking
-    lin_vel_error = torch.sum(
-        torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]),
-        dim=1,
-    )
-
-    r_vel = torch.exp(-lin_vel_error / 0.25)
-
-    # alive reward
-    r_alive = 1.0
-
-    # torque penalty
-    r_torque = torch.sum(torch.square(self.torques), dim=1)
-
-    reward = (
-        2.0 * r_vel
-        + 0.2 * r_alive
-        - 0.0002 * r_torque
-    )
-
-    return reward
-
 def energy(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     """Penalize the energy used by the robot's joints."""
     asset: Articulation = env.scene[asset_cfg.name]
