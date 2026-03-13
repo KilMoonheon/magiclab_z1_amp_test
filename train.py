@@ -11,6 +11,105 @@
 import gymnasium as gym
 import pathlib
 import sys
+import os
+import numpy as np
+import torch
+SIM_ORDER_INDICES = [0, 6, 1, 7, 2, 8, 3, 9, 4, 10, 5, 11]
+
+def patch_motion_files(motion_dir):
+    """
+    既然找不到代码在哪里加载，我们直接在源头上把所有 .npy 的内容顺序改了，
+    并保存为 '_ready.npy' 后缀的文件，然后让 cfg 指向新文件。
+    这是最暴力但也最有效的办法。
+    """
+    ready_dir = os.path.join(motion_dir, "reordered")
+    os.makedirs(ready_dir, exist_ok=True)
+    
+    for file in os.listdir(motion_dir):
+        if file.endswith(".npy") and not file.endswith("_ready.npy"):
+            path = os.path.join(motion_dir, file)
+            data = np.load(path, allow_pickle=True).item()
+            
+            # 执行重映射
+            joint_pos = np.array(data['joint_positions'])
+            if joint_pos.shape[1] == 12:
+                data['joint_positions'] = joint_pos[:, SIM_ORDER_INDICES]
+                # 同时也更新一下 joints_list 字符串（如果有的话），防止判别器报错
+                if 'joints_list' in data:
+                    new_list = [data['joints_list'][i] for i in SIM_ORDER_INDICES]
+                    data['joints_list'] = new_list
+                
+                new_path = os.path.join(ready_dir, file.replace(".npy", "_ready.npy"))
+                np.save(new_path, data)
+                print(f"[Patch] 已重排并保存: {new_path}")
+    
+    return ready_dir
+
+# --- 1. 终极路径修复补丁 ---
+base_site_packages = "/home/oper/miniconda3/envs/env_isaaclab/lib/python3.11/site-packages"
+# 确保定义这两个核心根目录
+exts_root = os.path.join(base_site_packages, "isaacsim/exts") 
+cache_root = os.path.join(base_site_packages, "isaacsim/extscache")
+
+if os.path.exists(cache_root):
+    import subprocess
+    try:
+        # 深度搜索所有含有 .so 的目录
+        cmd = f"find {cache_root} -name '*.so' -exec dirname {{}} \; | sort -u"
+        lib_dirs = subprocess.check_output(cmd, shell=True).decode().splitlines()
+        
+        # 注入 LD_LIBRARY_PATH
+        current_ld = os.environ.get("LD_LIBRARY_PATH", "")
+        os.environ["LD_LIBRARY_PATH"] = ":".join(lib_dirs) + ":" + current_ld
+        
+        # 将扩展包根目录加入 sys.path
+        cache_folders = [os.path.join(cache_root, f) for f in os.listdir(cache_root) 
+                         if os.path.isdir(os.path.join(cache_root, f))]
+        for folder in cache_folders:
+            if folder not in sys.path:
+                sys.path.insert(0, folder)
+        
+        print(f"已自动扫描并挂载 {len(lib_dirs)} 个库目录。")
+    except Exception as e:
+        print(f"路径扫描失败: {e}")
+
+# --- 接下来是原有的 URDF 和 Magicbot 逻辑 ---
+# 此时 exts_root 已经定义好了
+urdf_ext_path = os.path.join(exts_root, "isaacsim.asset.importer.urdf")
+if os.path.exists(urdf_ext_path):
+    if urdf_ext_path not in sys.path:
+        sys.path.insert(0, urdf_ext_path)
+    os.environ["LD_LIBRARY_PATH"] = urdf_ext_path + ":" + os.environ.get("LD_LIBRARY_PATH", "")
+
+# 补上 Magicbot 路径
+magicbot_path = "/opt/magic_robotics/magicbot_z1_sdk/lib"
+if os.path.exists(magicbot_path):
+    os.environ["PYTHONPATH"] = magicbot_path + ":" + os.environ.get("PYTHONPATH", "")
+    os.environ["LD_LIBRARY_PATH"] = magicbot_path + ":" + os.environ.get("LD_LIBRARY_PATH", "")
+
+# 添加核心 URDF 路径
+urdf_ext_path = os.path.join(exts_root, "isaacsim.asset.importer.urdf")
+if os.path.exists(urdf_ext_path):
+    if urdf_ext_path not in sys.path:
+        sys.path.insert(0, urdf_ext_path)
+    os.environ["LD_LIBRARY_PATH"] = urdf_ext_path + ":" + os.environ.get("LD_LIBRARY_PATH", "")
+
+# 动态扩展命名空间
+try:
+    import isaacsim
+    import omni
+    def extend_ns(module, paths):
+        for p in paths:
+            target_dir = os.path.join(p, module.__name__)
+            if os.path.exists(target_dir) and target_dir not in module.__path__:
+                module.__path__.append(target_dir)
+    
+    all_search_paths = cache_folders + [urdf_ext_path]
+    extend_ns(isaacsim, all_search_paths)
+    extend_ns(omni, all_search_paths)
+    print(f"已挂载 {len(cache_folders)} 个扩展包并同步加载库路径。")
+except ImportError:
+    pass
 
 sys.path.insert(0, f"{pathlib.Path(__file__).parent.parent}")
 from list_envs import import_packages  # noqa: F401
@@ -92,7 +191,24 @@ import shutil
 import torch
 from datetime import datetime
 
-from rsl_rl.runners import OnPolicyRunner  # TODO: Consider printing the experiment name in the terminal.
+import importlib
+
+def get_runner_class(runner_class_name):
+    """根据字符串动态加载 Runner 类"""
+    try:
+        if "." in runner_class_name:
+            module_path, class_name = runner_class_name.rsplit(".", 1)
+            module = importlib.import_module(module_path)
+            return getattr(module, class_name)
+        else:
+            # 如果只是短名称 "OnPolicyRunner"，则从标准库导入
+            from rsl_rl.runners import OnPolicyRunner
+            return OnPolicyRunner
+    except (ImportError, AttributeError) as e:
+        print(f"无法加载 Runner 类: {runner_class_name}，错误: {e}")
+        # 备选方案：尝试直接导入标准 Runner
+        from rsl_rl.runners import OnPolicyRunner
+        return OnPolicyRunner
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab.envs import (
@@ -154,8 +270,34 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         log_dir += f"_{agent_cfg.run_name}"
     log_dir = os.path.join(log_root_path, log_dir)
 
+    if hasattr(agent_cfg, 'amp'):
+        raw_path = os.path.expanduser(agent_cfg.amp["motion_files_path"])
+        # 转换并获取新目录
+        ready_path = patch_motion_files(raw_path)
+        # 将配置指向转换后的目录
+        agent_cfg.amp["motion_files_path"] = ready_path
+        print(f"[INFO] AMP 专家数据已自动重映射并指向: {ready_path}")
+
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    try:
+        # 尝试从 unwrapped 环境中获取 robot 资产
+        # 在 Isaac Lab 中，资产通常存储在 scene 字典中，键名通常为 "robot" 或 "articulation"
+        # 我们可以遍历 scene 中的所有 Articulation 资产
+        print("-" * 50)
+        print("[INFO] 正在扫描场景中的关节信息...")
+        scene_entities = env.unwrapped.scene.articulations
+        if scene_entities:
+            for entity_name, entity_obj in scene_entities.items():
+                joint_names = entity_obj.joint_names
+                print(f"资产名称: {entity_name}")
+                print(f"关节数量: {len(joint_names)}")
+                print(f"关节列表: {joint_names}")
+        else:
+            print("[WARN] 未在 scene.articulations 中找到任何机器人资产。")
+        print("-" * 50)
+    except Exception as e:
+        print(f"[WARN] 打印关节列表失败: {e}")
 
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv):
@@ -180,8 +322,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
-    # create runner from rsl-rl
-    runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    runner_cls = get_runner_class(agent_cfg.runner_class_name)
+    runner = runner_cls(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     # write git state to logs
     runner.add_git_repo_to_log(__file__)
     # load the checkpoint
